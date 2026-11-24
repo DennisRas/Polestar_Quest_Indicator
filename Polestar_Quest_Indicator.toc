@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Polestar Quest Indicator
+## Notes: Shows which loaded Polestar guides include a quest.
+## Author: Liquidor
+## Version: 1.0.0
+## Dependencies: Polestar
+
+GuideMarks.lua
