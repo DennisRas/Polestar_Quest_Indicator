@@ -26,6 +26,7 @@
 -- game's quest buttons, which that UI rebuilds inside the caller's code.
 -- Item and quest-link tooltips are not those buttons and still get the line.
 
+---@type PQI_Polestar
 local ns = Polestar
 if not ns then return end
 
@@ -35,7 +36,10 @@ local readable = ns.Compat.Readable
 local type, pairs, ipairs, pcall = type, pairs, ipairs, pcall
 local format, floor, max = string.format, math.floor, math.max
 
-local byQuest, byItem
+---@type PQI_HitMap?
+local byQuest
+---@type PQI_ItemMap?
+local byItem
 local built = false
 local pending = false
 
@@ -45,6 +49,7 @@ local tipped = setmetatable({}, { __mode = "k" })
 -- Index
 ---------------------------------------------------------------------------
 
+---@return PQI_Player?
 local function playerInfo()
 	local C = ns.Compat
 	if not (C and C.GetPlayerInfo) then return nil end
@@ -52,6 +57,9 @@ local function playerInfo()
 	return ok and type(info) == "table" and info or nil
 end
 
+---@param g PQI_Guide
+---@param player PQI_Player?
+---@return boolean
 local function includeGuide(g, player)
 	local G = ns.Guides
 	if not player then return true end
@@ -60,12 +68,17 @@ local function includeGuide(g, player)
 	return G.OtherStart and G.OtherStart(g, player) or false
 end
 
+---@param only PQI_Only?
+---@param player PQI_Player?
+---@return boolean
 local function applies(only, player)
 	local G = ns.Guides
 	if not player or not G.Matches then return true end
 	return G.Matches(only, player)
 end
 
+---@param g PQI_Guide
+---@return string
 local function guideTitle(g)
 	local UI = ns.UI
 	if UI and UI.GuideLabel then
@@ -76,6 +89,8 @@ local function guideTitle(g)
 	return g.id
 end
 
+---@param g PQI_Guide
+---@return string?
 local function dungeonKey(g)
 	if type(g.dungeon) == "string" and g.dungeon ~= "" then return g.dungeon end
 	local id = g.id
@@ -83,6 +98,9 @@ local function dungeonKey(g)
 	return id:match("^lookup/pickup/(.+)$") or id:match("^lookup/handin/(.+)$")
 end
 
+---@param map PQI_HitMap
+---@param quest number
+---@param hit PQI_Hit
 local function addHit(map, quest, hit)
 	local list = map[quest]
 	if not list then
@@ -95,6 +113,9 @@ local function addHit(map, quest, hit)
 	list[#list + 1] = hit
 end
 
+---@param map PQI_ItemMap
+---@param item number
+---@param quest number
 local function addItem(map, item, quest)
 	local list = map[item]
 	if not list then
@@ -107,6 +128,10 @@ local function addItem(map, item, quest)
 	list[#list + 1] = quest
 end
 
+---@param header PQI_Guide
+---@param player PQI_Player?
+---@param quests PQI_HitMap
+---@param items PQI_ItemMap
 local function scanGuide(header, player, quests, items)
 	local G = ns.Guides
 	local g = G.Get(header.id)
@@ -172,9 +197,15 @@ local function scheduleBuild()
 	ns.After(0, function()
 		pending = false
 		ensure()
+		local map = QuestMapFrame
+		if not ns.Hidden() and map and map.IsShown and map:IsShown() and type(QuestLogQuests_Update) == "function" then
+			pcall(QuestLogQuests_Update)
+		end
 	end)
 end
 
+---@param id number
+---@return string?
 local function questTitle(id)
 	local UI, N, Q = ns.UI, ns.Names, ns.QuestDB
 	local title = UI and UI.QuestTitle and UI.QuestTitle(id)
@@ -188,6 +219,8 @@ local function questTitle(id)
 	return nil
 end
 
+---@param mark PQI_DungeonMark
+---@return string?
 local function dungeonWhy(mark)
 	if not mark.quest then return nil end
 	local title = questTitle(mark.quest) or ("#" .. mark.quest)
@@ -196,19 +229,20 @@ local function dungeonWhy(mark)
 	return format(L["Needed for %s."], quoted)
 end
 
--- The Codex holds the dungeon marks. It stays unloaded until a quest is
--- actually asked about, and a load that fails in combat is tried again later.
+-- Dungeon marks live in the Codex. Loading it parses the whole dungeon
+-- database and freezes the game, so the quest list never starts that load.
+-- Marks appear once something else has loaded the Codex.
+---@return PQI_Dungeons?
 local function dungeons()
 	local D = ns.Dungeons
-	if not (D and D.QuestMark) then return nil end
-	if D.Meta and D.Meta() then return D end
-	local C = ns.Compat
-	if D.Load and not (C and C.InCombat and C.InCombat()) then pcall(D.Load) end
+	if not (D and D.QuestMark and D.Meta and D.Meta()) then return nil end
 	return D
 end
 
 -- The loaded guides, then a dungeon the Codex marks when no loaded guide
 -- already names it. Nil when nothing does.
+---@param questID number
+---@return PQI_Hit[]?
 local function hitsFor(questID)
 	if type(questID) ~= "number" then return nil end
 	ensure()
@@ -248,22 +282,28 @@ local function hitsFor(questID)
 end
 
 -- True when any loaded guide or a dungeon mark names it. The log paints a
--- star on every row, so this stays a lookup: hitsFor builds the lines.
+-- mark on every row, so this stays a lookup. It does not build the index or
+-- load the Codex: both of those stall the quest-log layout.
+---@param questID number
+---@return boolean
 local function involved(questID)
-	if type(questID) ~= "number" or questID <= 0 then return false end
-	ensure()
+	if type(questID) ~= "number" or questID <= 0 or not built then return false end
 	if byQuest and byQuest[questID] then return true end
 	local D = dungeons()
 	local mark = D and D.QuestMark(questID)
 	return mark ~= nil
 end
 
+---@param list PQI_Hit[]
+---@return string
 local function summary(list)
 	local parts = {}
 	for i = 1, #list do parts[i] = list[i].title end
 	return table.concat(parts, ", ")
 end
 
+---@param questID number
+---@return boolean
 local function notStarted(questID)
 	local C = ns.Compat
 	if C.IsQuestCompleted and C.IsQuestCompleted(questID) then return false end
@@ -273,10 +313,13 @@ end
 
 -- Quests an item starts: an accept goal's item, and the quest database's
 -- start item. The database knows items no guide names.
+---@param itemID number
+---@return number[]?
 local function questsFromItem(itemID)
 	if type(itemID) ~= "number" then return nil end
 	ensure()
 	local seen, out = {}, {}
+	---@param q number
 	local function add(q)
 		if type(q) == "number" and not seen[q] then
 			seen[q] = true
@@ -284,11 +327,15 @@ local function questsFromItem(itemID)
 		end
 	end
 	local from = byItem and byItem[itemID]
-	for i = 1, from and #from or 0 do add(from[i]) end
+	if from then
+		for i = 1, #from do add(from[i]) end
+	end
 	local Q = ns.QuestDB
 	if Q and Q.StartedBy then
 		local list = Q.StartedBy(itemID)
-		for i = 1, list and #list or 0 do add(list[i]) end
+		if list then
+			for i = 1, #list do add(list[i]) end
+		end
 	end
 	return #out > 0 and out or nil
 end
@@ -301,6 +348,10 @@ end
 local markTags = {}
 
 -- r, g, b: the text this glyph sits in, so the icon takes that color.
+---@param r number?
+---@param g number?
+---@param b number?
+---@return string
 local function mark(r, g, b)
 	r, g, b = r or 1, g or 1, b or 1
 	local key = floor(r * 255 + 0.5) .. ":" .. floor(g * 255 + 0.5) .. ":" .. floor(b * 255 + 0.5)
@@ -316,6 +367,9 @@ end
 
 -- The color the letters are actually drawn in. A |c code in the title wins
 -- over the font's own color.
+---@param fs FontString?
+---@param text string?
+---@return number, number, number
 local function textColor(fs, text)
 	if type(text) == "string" then
 		local hex
@@ -329,34 +383,48 @@ local function textColor(fs, text)
 	end
 	if fs and fs.GetTextColor then
 		local r, g, b = fs:GetTextColor()
-		if type(r) == "number" then return r, g, b end
+		if type(r) == "number" and type(g) == "number" and type(b) == "number" then return r, g, b end
 	end
 	return 1, 1, 1
 end
 
+---@param text string?
+---@return boolean
 local function marked(text)
 	return type(text) == "string" and (text:find("UI\\guides", 1, true) or text:find("UI/guides", 1, true)) and true or false
 end
 
+---@param obj PQI_TextHost|FontString|nil
+---@return FontString?
 local function textObject(obj)
-	if type(obj) ~= "table" then return nil end
-	if obj.GetText and obj.SetText then return obj end
+	if not obj then return nil end
+	if obj.GetObjectType and obj:GetObjectType() == "FontString" then
+		---@cast obj FontString
+		return obj
+	end
+	---@cast obj PQI_TextHost
+	---@type FontString?
 	local fs = obj.GetFontString and obj:GetFontString()
 	if fs and fs.GetText and fs.SetText then return fs end
 	fs = obj.Text
-	if type(fs) == "table" and fs.GetText and fs.SetText then return fs end
+	if fs and fs.GetText and fs.SetText then return fs end
 	return nil
 end
 
 -- kind "gossip" / "greeting" may grow the button. The log and the tracker
 -- are already laid out, so a mark that would wrap the title onto another
 -- line is left off.
+---@param obj PQI_TextHost|FontString
+---@param questID number
+---@param kind string?
 local function applyMark(obj, questID, kind)
 	if ns.Hidden() or not involved(questID) then return end
 	local fs = textObject(obj)
 	if not fs then return end
 	local text = readable(fs:GetText())
-	if type(text) ~= "string" or text == "" or marked(text) then return end
+	if type(text) ~= "string" or text == "" then return end
+	---@cast text string
+	if marked(text) then return end
 	local measure = not kind and fs.GetNumLines and fs or nil
 	local lines = measure and measure:GetNumLines()
 	local r, g, b = textColor(fs, text)
@@ -365,10 +433,18 @@ local function applyMark(obj, questID, kind)
 		fs:SetText(text)
 		return
 	end
-	if kind == "gossip" and obj.Resize then obj:Resize() end
-	if kind == "greeting" and obj.SetHeight and obj.GetTextHeight then
-		local icon = obj.Icon
-		obj:SetHeight(max((obj:GetTextHeight() or 0) + 2, icon and icon.GetHeight and icon:GetHeight() or 0))
+	if kind == "gossip" then
+		---@cast obj PQI_TextHost
+		if obj.Resize then obj:Resize() end
+	end
+	if kind == "greeting" then
+		---@cast obj PQI_TextHost
+		if obj.SetHeight and obj.GetTextHeight then
+			local icon = obj.Icon
+			local textH = obj:GetTextHeight() or 0
+			local iconH = icon and icon.GetHeight and icon:GetHeight() or 0
+			obj:SetHeight(max(textH + 2, iconH))
+		end
 	end
 end
 
@@ -376,15 +452,19 @@ end
 -- Tooltips
 ---------------------------------------------------------------------------
 
+---@return number, number, number
 local function tipColor()
 	local T = ns.Theme
 	if T and T.TipColor then
 		local r, g, b = T.TipColor("quest")
-		if r then return r, g, b end
+		if type(r) == "number" and type(g) == "number" and type(b) == "number" then return r, g, b end
 	end
 	return 1, 0.82, 0.45
 end
 
+---@param tt GameTooltip
+---@param questID number
+---@return boolean
 local function addQuestLines(tt, questID)
 	if ns.Hidden() or tipped[tt] == questID then return false end
 	local list = hitsFor(questID)
@@ -399,6 +479,9 @@ local function addQuestLines(tt, questID)
 	return true
 end
 
+---@param owner PQI_TipOwner
+---@param questID number
+---@param anchor string?
 local function showOwnedTip(owner, questID, anchor)
 	if ns.Hidden() or type(questID) ~= "number" then return end
 	local tt = GameTooltip
@@ -415,6 +498,9 @@ local function showOwnedTip(owner, questID, anchor)
 	end
 end
 
+---@param obj PQI_TipOwner
+---@param questID number
+---@param anchor string
 local function bindTip(obj, questID, anchor)
 	if type(obj) ~= "table" then return end
 	obj.psGuideQuest = questID
@@ -432,7 +518,10 @@ local function bindTip(obj, questID, anchor)
 	end)
 end
 
-local function onItem(tt, _, itemID)
+---@param tt GameTooltip
+---@param link string?
+---@param itemID number?
+local function onItem(tt, link, itemID)
 	if ns.Hidden() or type(itemID) ~= "number" then return end
 	local quests = questsFromItem(itemID)
 	if not quests then return end
@@ -447,6 +536,9 @@ local function onItem(tt, _, itemID)
 	end
 end
 
+---@param data PQI_TipData?
+---@param link string?
+---@return number?
 local function questIdOf(data, link)
 	local id = type(data) == "table" and readable(data.id)
 	if type(id) == "number" and id > 0 then return id end
@@ -457,6 +549,8 @@ local function questIdOf(data, link)
 	return tonumber(link:match("quest:(%d+)"))
 end
 
+---@param tt GameTooltip
+---@param data PQI_TipData?
 local function onQuestTip(tt, data)
 	if ns.Hidden() or not tt then return end
 	if tt.IsForbidden then
@@ -468,22 +562,29 @@ local function onQuestTip(tt, data)
 end
 
 ---------------------------------------------------------------------------
--- Quest details, under the rewards
+-- Quest details, under the description
 ---------------------------------------------------------------------------
 
 local generation = 0
-local openParent, openQuest
+---@type number?
+local openQuest
 
+---@param obj FontString|Frame|nil
+---@return FontString?
 local function asFont(obj)
 	if type(obj) == "table" and obj.GetFont then return obj end
 	return nil
 end
 
+---@param fs FontString
+---@param sample FontString?
+---@param fallbackName string
 local function useFont(fs, sample, fallbackName)
 	local fontObj = sample and sample.GetFontObject and sample:GetFontObject()
 	if fontObj then
 		fs:SetFontObject(fontObj)
 	else
+		---@type FontObject?
 		local fallback = _G[fallbackName]
 		if fallback then fs:SetFontObject(fallback) end
 	end
@@ -506,20 +607,21 @@ local PAD = 14
 
 -- Scroll the picker's list so the selected guide is in view. The row stores
 -- its guide as psGuide; its top offset is how far the list has placed it.
+---@param id string
 local function scrollGuideIntoView(id)
-	local P = ns.UI and ns.UI.Picker
+	local UI = ns.UI
+	local P = UI and UI.Picker
 	local frame = P and P.frame
-	local body = frame and frame.Body
-	local scroll = P and P.scroll
 	local W = ns.Widgets
-	if not (body and scroll and W and W.ScrollTo and body.GetChildren) then return end
-	local children = { body:GetChildren() }
+	if not P or not frame or not frame.Body or not P.scroll or not W then return end
+	local children = { frame.Body:GetChildren() }
 	for i = 1, #children do
 		local child = children[i]
+		---@cast child PQI_PickerRow
 		local g = child.psGuide
-		if g and g.id == id and child.IsShown and child:IsShown() then
+		if g and g.id == id and child:IsShown() then
 			local _, _, _, _, y = child:GetPoint(1)
-			W.ScrollTo(scroll, max(0, -(y or 0) - 36))
+			if type(y) == "number" then W.ScrollTo(P.scroll, max(0, -y - 36)) end
 			return
 		end
 	end
@@ -527,10 +629,13 @@ end
 
 -- Open the guide in the finder. Does not load it. Uses the picker's own
 -- functions, so this addon does not patch Polestar.
+---@param id string
+---@return boolean
 local function showGuide(id)
 	local UI = ns.UI
-	local P = UI and UI.Picker
-	if not (P and UI.ShowPicker and P.ShowSection and P.SetQuery and P.SetCategory and P.Select) then return false end
+	if not UI or not UI.ShowPicker then return false end
+	local P = UI.Picker
+	if not P or not P.ShowSection or not P.SetQuery or not P.SetCategory or not P.Select then return false end
 	UI.ShowPicker()
 	P.ShowSection("Guides")
 	P.SetQuery("")
@@ -543,6 +648,7 @@ local function showGuide(id)
 	return true
 end
 
+---@param hit PQI_Hit?
 local function openHit(hit)
 	if type(hit) ~= "table" then return end
 	local id = hit.key
@@ -557,6 +663,7 @@ end
 
 local tipToken = 0
 
+---@param row PQI_GuideRow
 local function linkTip(row)
 	local hit = row and row.hit
 	if type(hit) ~= "table" or not GameTooltip then return end
@@ -573,12 +680,14 @@ local function linkTip(row)
 	GameTooltip:Show()
 end
 
+---@param block PQI_GuideRow
 local function hideLinkTip(block)
 	if GameTooltip and GameTooltip.GetOwner and GameTooltip:GetOwner() == block then GameTooltip:Hide() end
 end
 
 -- Leave fires before the next line's enter. Waiting a frame keeps the tip
 -- up while the cursor moves from one guide name to the next.
+---@param block PQI_GuideRow
 local function queueHideLinkTip(block)
 	local token = tipToken
 	ns.After(0, function()
@@ -587,6 +696,8 @@ local function queueHideLinkTip(block)
 	end)
 end
 
+---@param self PQI_GuideRow
+---@param delta number
 local function passWheel(self, delta)
 	local p = self
 	for _ = 1, 8 do
@@ -605,6 +716,10 @@ local function passWheel(self, delta)
 end
 
 -- A light wash behind the whole line. The quest text and icon stay as they are.
+---@param r number?
+---@param g number?
+---@param b number?
+---@return number, number, number
 local function hoverInk(r, g, b)
 	r, g, b = r or 1, g or 1, b or 1
 	local lum = r * 0.3 + g * 0.59 + b * 0.11
@@ -612,6 +727,10 @@ local function hoverInk(r, g, b)
 	return 0.45, 0.32, 0.16
 end
 
+---@param row PQI_GuideRow?
+---@param r number?
+---@param g number?
+---@param b number?
 local function paintRow(row, r, g, b)
 	if not row then return end
 	if row.Text then
@@ -623,10 +742,14 @@ end
 
 -- One button per guide. A font-string hyperlink in the quest scroll never
 -- receives mouse motion, so the hover has to be a real button.
+---@param block PQI_Overlay
+---@param index number
+---@return PQI_GuideRow
 local function rowFor(block, index)
 	local row = block.rows[index]
 	if row then return row end
 	row = ns.CreateFrameUnder("Button", nil, block)
+	---@cast row PQI_GuideRow
 	row:RegisterForClicks("LeftButtonUp")
 	if row.EnableMouseWheel then row:EnableMouseWheel(true) end
 	row:SetScript("OnMouseWheel", passWheel)
@@ -668,51 +791,69 @@ end
 -- The guide rows are their own font strings under that prose. Putting them
 -- inside it makes the quest frame clip the extra lines and end them with an
 -- ellipsis.
+---@return PQI_Prose?
 local function prose()
+	---@param fs FontString?
+	---@return PQI_Prose?
 	local function usable(fs)
-		if type(fs) ~= "table" or not (fs.IsShown and fs:IsShown() and fs.GetText and fs.SetText) then return nil end
+		if not fs or not fs:IsShown() or not fs.GetText then return nil end
 		local t = fs:GetText()
 		if type(t) ~= "string" or t == "" then return nil end
+		---@cast fs PQI_Prose
 		return fs
 	end
 	return usable(QuestInfoDescriptionText) or usable(QuestInfoObjectivesText)
 end
 
+---@param text string?
+---@return string, boolean
 local function stripGuides(text)
 	if type(text) ~= "string" then return "", false end
 	for _, header in ipairs({ L["Polestar Guides"], L["Guide"] }) do
-		local mark = "\n\n" .. header .. "\n\n"
-		local at = text:find(mark, 1, true)
+		local needle = "\n\n" .. header .. "\n\n"
+		local at = text:find(needle, 1, true)
 		if at then return text:sub(1, at - 1), true end
 	end
 	return text, false
 end
 
+---@param start Region
+---@return Region?, ScrollFrame?
 local function scrollPair(start)
 	local p = start
 	for _ = 1, 8 do
 		if not p then return nil, nil end
 		local parent = p.GetParent and p:GetParent()
-		if parent and parent.GetScrollChild and parent:GetScrollChild() == p then return p, parent end
+		if parent and parent.GetScrollChild and parent:GetScrollChild() == p then
+			---@cast parent ScrollFrame
+			return p, parent
+		end
 		p = parent
 	end
 	return nil, nil
 end
 
+---@param frame Region?
+---@param extra number
 local function addHeight(frame, extra)
-	if not (frame and frame.SetHeight and frame.GetHeight) or type(extra) ~= "number" or extra <= 0 then return end
+	if not frame or type(extra) ~= "number" or extra <= 0 then return end
+	if not frame.GetHeight or not frame.SetHeight then return end
 	local before = frame:GetHeight() or 0
 	if before <= 1 then return end
 	pcall(frame.SetHeight, frame, before + extra)
 end
 
+---@type table<FontString, PQI_Overlay>
 local overlays = setmetatable({}, { __mode = "k" })
 
+---@param desc PQI_Prose
+---@return PQI_Overlay
 local function overlayFor(desc)
 	local parent = desc:GetParent() or desc
 	local f = overlays[desc]
 	if not f then
 		f = ns.CreateFrameUnder("Frame", nil, parent)
+		---@cast f PQI_Overlay
 		f:EnableMouse(false)
 		f.rows = {}
 		overlays[desc] = f
@@ -729,17 +870,24 @@ end
 
 -- Objectives, Description, Rewards. The map rewards frame has no heading of
 -- its own, so a shown heading on this page is the one to copy.
+---@return FontString?
 local function sectionHeader()
 	local found
+	---@param fs FontString?
+	---@return FontString?
 	local function add(fs)
-		if not asFont(fs) then return end
+		if not fs or not asFont(fs) then return nil end
 		found = found or fs
-		if fs.IsShown and fs:IsShown() then return fs end
+		if fs:IsShown() then return fs end
+		return nil
 	end
-	local shown = add(QuestInfoObjectivesHeader) or add(QuestInfoDescriptionHeader) or add(QuestInfoRewardsFrameHeader)
+	---@type FontString?
+	local rewardsHeader = QuestInfoRewardsFrameHeader
+	local shown = add(QuestInfoObjectivesHeader) or add(QuestInfoDescriptionHeader) or add(rewardsHeader)
 	if shown then return shown end
 	if QuestInfoRewardsFrame then shown = add(QuestInfoRewardsFrame.Header) end
 	if shown then return shown end
+	---@type PQI_RewardsFrame?
 	local rewards = QuestInfoFrame and QuestInfoFrame.rewardsFrame
 	if rewards then shown = add(rewards.Header) end
 	return shown or found
@@ -747,22 +895,26 @@ end
 
 -- A bottom anchor locks the prose height, and the quest frame then draws "..."
 -- for anything past that box. Keep the top anchor and the width.
+---@param fs FontString
 local function dropBottomAnchor(fs)
 	if not (fs.GetNumPoints and fs.ClearAllPoints and fs.SetPoint) then return end
 	local n = fs:GetNumPoints() or 0
 	if n < 2 then return end
-	local kept, width = {}, fs.GetWidth and fs:GetWidth() or 0
+	---@type PQI_Anchor[]
+	local kept = {}
+	local width = fs.GetWidth and fs:GetWidth() or 0
 	for i = 1, n do
 		local point, rel, relPoint, x, y = fs:GetPoint(i)
-		if type(point) == "string" and not point:find("BOTTOM", 1, true) then
-			kept[#kept + 1] = { point, rel, relPoint, x, y }
+		if type(point) == "string" and type(relPoint) == "string" and type(x) == "number" and type(y) == "number" and not point:find("BOTTOM", 1, true) then
+			---@cast rel Frame
+			kept[#kept + 1] = { point = point, rel = rel, relPoint = relPoint, x = x, y = y }
 		end
 	end
 	if #kept == 0 or #kept == n then return end
 	fs:ClearAllPoints()
 	for i = 1, #kept do
 		local a = kept[i]
-		fs:SetPoint(a[1], a[2], a[3], a[4] or 0, a[5] or 0)
+		fs:SetPoint(a.point, a.rel, a.relPoint, a.x, a.y)
 	end
 	if type(width) == "number" and width > 20 and fs.SetWidth then fs:SetWidth(width) end
 end
@@ -770,6 +922,8 @@ end
 -- Measure the whole string, not the height it was clipped to. A reading that
 -- comes back as the box we just opened is the box, not the text, so it is
 -- discarded.
+---@param fs FontString
+---@return number
 local function fitString(fs)
 	if not fs then return 0 end
 	if fs.SetMaxLines then pcall(fs.SetMaxLines, fs, 0) end
@@ -787,6 +941,8 @@ local function fitString(fs)
 	return h
 end
 
+---@param fs FontString?
+---@return number
 local function measured(fs)
 	if not fs then return 16 end
 	if fs.SetHeight then fs:SetHeight(0) end
@@ -802,9 +958,13 @@ end
 
 -- Whatever the page anchored under the prose (objectives, rewards) moves to
 -- sit under the guide block.
+---@param desc PQI_Prose
+---@param overlay PQI_Overlay
 local function shiftFollowers(desc, overlay)
+	---@param frame Frame?
 	local function scan(frame)
 		if not frame or frame == overlay then return end
+		---@param obj Region
 		local function consider(obj)
 			if obj == desc or obj == overlay or not obj.GetNumPoints then return end
 			local n = obj:GetNumPoints() or 0
@@ -828,6 +988,8 @@ local function shiftFollowers(desc, overlay)
 	if QuestInfoFrame and QuestInfoFrame ~= desc:GetParent() then scan(QuestInfoFrame) end
 end
 
+---@param desc PQI_Prose
+---@param extra number
 local function growChain(desc, extra)
 	if type(extra) ~= "number" or extra <= 1 then return end
 	local child, scroll = scrollPair(desc)
@@ -845,11 +1007,16 @@ local function growChain(desc, extra)
 	if scroll and scroll.UpdateScrollChildRect then pcall(scroll.UpdateScrollChildRect, scroll) end
 end
 
+---@param hit PQI_Hit
+---@return string
 local function plainTitle(hit)
 	local title = type(hit.title) == "string" and hit.title or ""
 	return (title:gsub("|", ""))
 end
 
+---@param desc PQI_Prose
+---@param list PQI_Hit[]
+---@return number
 local function placeHits(desc, list)
 	local overlay = overlayFor(desc)
 	local r, g, b = textColor(desc, desc:GetText())
@@ -914,10 +1081,12 @@ local function placeHits(desc, list)
 	return y
 end
 
+---@param questID number?
 local function place(questID)
 	local desc = prose()
 	if not desc then return end
-	local list = (not ns.Hidden()) and hitsFor(questID) or nil
+	local list = nil
+	if type(questID) == "number" and not ns.Hidden() then list = hitsFor(questID) end
 	local raw = desc:GetText() or ""
 	local stripped = stripGuides(raw)
 	local base = (desc.psGuideShown == raw and desc.psGuideBase) or stripped
@@ -929,10 +1098,10 @@ local function place(questID)
 	if not list then
 		local overlay = overlays[desc]
 		if overlay then overlay:Hide() end
-		openParent, openQuest = nil, nil
+		openQuest = nil
 		return
 	end
-	openParent, openQuest = desc, questID
+	openQuest = questID
 	local blockH = placeHits(desc, list) or 0
 	shiftFollowers(desc, overlays[desc])
 	local grown = desc.psGuideGrown or 0
@@ -949,6 +1118,8 @@ local function place(questID)
 	end
 end
 
+---@param template PQI_QuestTemplate?
+---@return number?
 local function questOf(template)
 	local q
 	if type(template) == "table" and template.questLog and C_QuestLog and C_QuestLog.GetSelectedQuest then
@@ -963,6 +1134,7 @@ local function questOf(template)
 	return nil
 end
 
+---@param template PQI_QuestTemplate?
 local function onInfoDisplay(template)
 	local questID = questOf(template)
 	generation = generation + 1
@@ -987,11 +1159,17 @@ end
 -- Quest log, tracker, gossip, greeting
 ---------------------------------------------------------------------------
 
+---@param pool ObjectPool
+---@return fun(): PQI_TextHost
+local function activeButtons(pool)
+	return pool:EnumerateActive()
+end
+
 local function onLogUpdate()
 	if ns.Hidden() then return end
 	local pool = QuestScrollFrame and QuestScrollFrame.titleFramePool
 	if not pool then return end
-	for button in pool:EnumerateActive() do
+	for button in activeButtons(pool) do
 		local q = readable(button.questID)
 		if type(q) == "number" and q > 0 then
 			applyMark(button.Text or button, q)
@@ -1002,9 +1180,11 @@ local function onLogUpdate()
 	end
 end
 
+---@param module PQI_Tracker
+---@param quest PQI_TrackerQuest?
 local function onTrackerUpdate(module, quest)
 	if ns.Hidden() then return end
-	if not (quest and quest.GetID and module.GetExistingBlock) then return end
+	if not quest or not quest.GetID or not module or not module.GetExistingBlock then return end
 	local q = readable(quest:GetID())
 	if type(q) ~= "number" then return end
 	local block = module:GetExistingBlock(q)
@@ -1013,6 +1193,8 @@ local function onTrackerUpdate(module, quest)
 	bindTip(block, q, "ANCHOR_LEFT")
 end
 
+---@param button PQI_QuestButton
+---@param questInfo PQI_GossipInfo
 local function onGossipSetup(button, questInfo)
 	if ns.Hidden() or type(questInfo) ~= "table" then return end
 	local q = readable(questInfo.questID)
@@ -1023,20 +1205,28 @@ end
 
 local function onGreetingShow()
 	if ns.Hidden() then return end
-	local pool = QuestFrameGreetingPanel and QuestFrameGreetingPanel.titleButtonPool
+	local panel = QuestFrameGreetingPanel
+	if not panel then return end
+	---@cast panel PQI_GreetingPanel
+	local pool = panel.titleButtonPool
 	if not pool then return end
-	for button in pool:EnumerateActive() do
+	for button in activeButtons(pool) do
 		local i = button:GetID()
+		---@type number?
 		local q
-		if button.isActive == 1 then
-			q = GetActiveQuestID and GetActiveQuestID(i)
+		if button.isActive == 1 and GetActiveQuestID then
+			---@type number?
+			local picked = GetActiveQuestID(i)
+			q = picked
 		elseif GetAvailableQuestInfo then
-			q = select(5, GetAvailableQuestInfo(i))
+			---@type number?
+			local picked = select(5, GetAvailableQuestInfo(i))
+			q = picked
 		end
-		q = readable(q)
-		if type(q) == "number" then
-			applyMark(button, q, "greeting")
-			bindTip(button, q, "ANCHOR_RIGHT")
+		local id = readable(q)
+		if type(id) == "number" then
+			applyMark(button, id, "greeting")
+			bindTip(button, id, "ANCHOR_RIGHT")
 		else
 			button.psGuideQuest = nil
 		end
@@ -1086,6 +1276,7 @@ local SURFACES = {
 
 local pendingSurfaces = #SURFACES
 
+---@return boolean
 local function installReady()
 	for i = 1, #SURFACES do
 		local s = SURFACES[i]
@@ -1102,14 +1293,19 @@ local function onAddonLoaded()
 	if installReady() then ns.UnregisterEvent("ADDON_LOADED", onAddonLoaded) end
 end
 
+local hookedTips = setmetatable({}, { __mode = "k" })
+
+---@param tt GameTooltip?
 local function watchTooltip(tt)
-	if not (tt and tt.HookScript) or tt.psGuideClear then return end
+	if not tt or not tt.HookScript or hookedTips[tt] then return end
 	if tt.HasScript then
 		local ok, supported = pcall(tt.HasScript, tt, "OnTooltipCleared")
 		if ok and supported == false then return end
 	end
-	local ok = pcall(tt.HookScript, tt, "OnTooltipCleared", function(self) tipped[self] = nil end)
-	if ok then tt.psGuideClear = true end
+	---@param self GameTooltip
+	local function clearTip(self) tipped[self] = nil end
+	local ok = pcall(tt.HookScript, tt, "OnTooltipCleared", clearTip)
+	if ok then hookedTips[tt] = true end
 end
 
 local function installTips()
@@ -1123,6 +1319,8 @@ local function installTips()
 		P.AddTooltipPostCall(T.Quest, onQuestTip)
 		return
 	end
+	---@param self GameTooltip
+	---@param link string
 	local function onLink(self, link)
 		local id = questIdOf(nil, link)
 		if id then addQuestLines(self, id) end
